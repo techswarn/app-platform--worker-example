@@ -1,0 +1,44 @@
+name: api-worker
+region: nyc
+
+services:
+  - name: api
+    # github:
+    #   repo: <your-github-username>/<your-repo>
+    #   branch: main
+    #   deploy_on_push: true
+    dockerfile_path: api/Dockerfile
+    source_dir: api
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    envs:
+      - key: CELERY_BROKER_URL
+        value: ${valkey.DATABASE_URL}
+        scope: RUN_TIME
+      - key: CELERY_RESULT_BACKEND
+        value: ${valkey.DATABASE_URL}
+        scope: RUN_TIME
+
+workers:
+  - name: celery-worker
+    # github:
+    #   repo: <your-github-username>/<your-repo>
+    #   branch: main
+    #   deploy_on_push: true
+    dockerfile_path: worker/Dockerfile
+    source_dir: worker
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    envs:
+      - key: CELERY_BROKER_URL
+        value: ${valkey.DATABASE_URL}
+        scope: RUN_TIME
+      - key: CELERY_RESULT_BACKEND
+        value: ${valkey.DATABASE_URL}
+        scope: RUN_TIME
+
+databases:
+  - name: valkey
+    engine: VALKEY
+    production: false
