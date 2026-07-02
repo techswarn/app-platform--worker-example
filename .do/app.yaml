@@ -28,6 +28,8 @@ workers:
     #   deploy_on_push: true
     dockerfile_path: worker/Dockerfile
     source_dir: worker
+    # Horizontal scaling: each extra instance is a separate worker process
+    # running CELERY_CONCURRENCY tasks in parallel (see envs below).
     instance_count: 1
     instance_size_slug: basic-xxs
     envs:
@@ -37,6 +39,21 @@ workers:
       - key: CELERY_RESULT_BACKEND
         value: ${valkey.DATABASE_URL}
         scope: RUN_TIME
+      - key: CELERY_POOL
+        value: "threads"
+        scope: RUN_TIME
+      - key: CELERY_CONCURRENCY
+        value: "8"
+        scope: RUN_TIME
+      - key: CELERY_VISIBILITY_TIMEOUT
+        value: "60"
+        scope: RUN_TIME
+    # Each unit of work is a ~10s step (see worker/app/tasks.py), so Celery's
+    # default warm shutdown (finish the current step, stop taking new ones)
+    # comfortably fits well inside even the default 120s grace period. 180s
+    # just adds margin for slow network/SSL setup on cold start.
+    termination:
+      grace_period_seconds: 180
 
 databases:
   - name: valkey

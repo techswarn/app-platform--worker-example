@@ -7,4 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+# Pool/concurrency come from CELERY_POOL / CELERY_CONCURRENCY (see
+# app/celery_app.py) so they're configurable via env vars without editing
+# this file or the CLI command.
+CMD ["celery", "-A", "app.celery_app", "worker", "--loglevel=info"]
