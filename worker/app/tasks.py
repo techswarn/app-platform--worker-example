@@ -1,6 +1,7 @@
 import time
 
 from app.celery_app import celery_app
+from app.progress import clear_progress, set_progress
 
 # Total runtime > 10 minutes, done as small steps so progress can be
 # reported back to the UI while the task is running.
@@ -29,15 +30,20 @@ def run_long_task(self, label: str = "task", step: int = 1, total: int = TOTAL_S
     percent = round(step / total * 100, 1)
 
     if step < total:
-        self.update_state(
-            state="PROGRESS",
-            meta={"current": step, "total": total, "percent": percent, "label": label},
+        # Durable progress record the API reads directly (see
+        # api/app/progress.py) -- not Celery's built-in task state, which
+        # gets overwritten by the next step's STARTED transition almost
+        # immediately after self.replace() hands off below.
+        set_progress(
+            self.request.id,
+            {"current": step, "total": total, "percent": percent, "label": label},
         )
         # Same task_id, new message: keeps /api/tasks/{task_id} polling
         # working unchanged while making each unit of work independently
         # durable.
         raise self.replace(run_long_task.si(label, step + 1, total))
 
+    clear_progress(self.request.id)
     return {
         "label": label,
         "current": total,

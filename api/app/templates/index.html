@@ -4,50 +4,101 @@
   <meta charset="UTF-8" />
   <title>API Worker</title>
   <style>
-    body { font-family: -apple-system, Arial, sans-serif; max-width: 560px; margin: 60px auto; color: #1a1a1a; }
+    body { font-family: -apple-system, Arial, sans-serif; max-width: 640px; margin: 60px auto; color: #1a1a1a; }
     button { padding: 10px 18px; font-size: 15px; cursor: pointer; }
     button:disabled { cursor: default; opacity: 0.6; }
-    #bar-outer { background: #eee; border-radius: 6px; height: 14px; margin-top: 16px; overflow: hidden; }
-    #bar-inner { background: #2563eb; height: 100%; width: 0%; transition: width 0.4s; }
-    #status { margin-top: 12px; font-size: 14px; color: #444; }
     input { padding: 8px; font-size: 14px; margin-right: 8px; }
+    #tasks { margin-top: 24px; display: flex; flex-direction: column; gap: 14px; }
+    .task-card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 12px 14px; }
+    .task-title { font-size: 13px; color: #666; margin-bottom: 8px; word-break: break-all; }
+    .bar-outer { background: #eee; border-radius: 6px; height: 12px; overflow: hidden; }
+    .bar-inner { background: #2563eb; height: 100%; width: 0%; transition: width 0.4s; }
+    .task-status { margin-top: 8px; font-size: 14px; color: #444; }
+    .task-status.done { color: #16803c; }
+    .task-status.failed { color: #b91c1c; }
   </style>
 </head>
 <body>
   <h2>Long-Running Task Demo</h2>
-  <p>Submits a job to a Celery worker (broker: Valkey). The task runs for about 11 minutes.</p>
+  <p>Submits jobs to a Celery worker (broker: Valkey). Each task runs for about 11 minutes.
+     Submit as many as you like — they run concurrently, each tracked below.</p>
 
   <input id="label" type="text" value="my-task" />
   <button id="submit">Start Task</button>
 
-  <div id="bar-outer"><div id="bar-inner"></div></div>
-  <div id="status">Idle.</div>
+  <div id="tasks"></div>
 
   <script>
     const submitBtn = document.getElementById("submit");
-    const barInner = document.getElementById("bar-inner");
-    const statusEl = document.getElementById("status");
     const labelInput = document.getElementById("label");
-    let pollHandle = null;
+    const tasksEl = document.getElementById("tasks");
 
-    async function submitTask() {
-      submitBtn.disabled = true;
-      statusEl.textContent = "Submitting task...";
-      barInner.style.width = "0%";
+    // Tasks run for ~11 minutes server-side, well past the lifetime of a
+    // page load. The browser has no memory of a task once you reload --
+    // only the server (via Celery/Valkey) does -- so we persist the list
+    // of {taskId, label} we've submitted in localStorage, and on load
+    // reconnect a card + poll loop for each one that isn't already
+    // finished. This is purely a client-side "remember what I started"
+    // list -- the actual task state always comes from /api/tasks/{id}.
+    const STORAGE_KEY = "api-worker-tasks";
 
-      const res = await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label: labelInput.value || "task" }),
-      });
-      const data = await res.json();
-      statusEl.textContent = "Task queued: " + data.task_id;
-      poll(data.task_id);
+    function loadStoredTasks() {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      } catch {
+        return [];
+      }
     }
 
-    function poll(taskId) {
-      if (pollHandle) clearInterval(pollHandle);
-      pollHandle = setInterval(async () => {
+    function saveStoredTasks(tasks) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+    }
+
+    function rememberTask(taskId, label) {
+      const tasks = loadStoredTasks();
+      tasks.push({ taskId, label });
+      saveStoredTasks(tasks);
+    }
+
+    function forgetTask(taskId) {
+      saveStoredTasks(loadStoredTasks().filter((t) => t.taskId !== taskId));
+    }
+
+    // Each submitted task gets its own card + its own poll loop, so tasks
+    // run and are tracked independently -- submitting a new one never
+    // blocks on, or is blocked by, any other task in flight.
+    async function submitTask() {
+      submitBtn.disabled = true; // just long enough to avoid double-firing this one click
+      const label = labelInput.value || "task";
+
+      try {
+        const res = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label }),
+        });
+        const data = await res.json();
+        rememberTask(data.task_id, label);
+        addTaskCard(data.task_id, label);
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    function addTaskCard(taskId, label) {
+      const card = document.createElement("div");
+      card.className = "task-card";
+      card.innerHTML = `
+        <div class="task-title">${label} — ${taskId}</div>
+        <div class="bar-outer"><div class="bar-inner"></div></div>
+        <div class="task-status">Loading status...</div>
+      `;
+      tasksEl.prepend(card);
+
+      const barInner = card.querySelector(".bar-inner");
+      const statusEl = card.querySelector(".task-status");
+
+      async function tick() {
         const res = await fetch(`/api/tasks/${taskId}`);
         const data = await res.json();
 
@@ -57,16 +108,27 @@
         } else if (data.state === "SUCCESS") {
           barInner.style.width = "100%";
           statusEl.textContent = "Done: " + JSON.stringify(data.result);
+          statusEl.classList.add("done");
           clearInterval(pollHandle);
-          submitBtn.disabled = false;
+          forgetTask(taskId);
         } else if (data.state === "FAILURE") {
           statusEl.textContent = "Failed: " + data.error;
+          statusEl.classList.add("failed");
           clearInterval(pollHandle);
-          submitBtn.disabled = false;
+          forgetTask(taskId);
         } else {
           statusEl.textContent = "State: " + data.state;
         }
-      }, 5000);
+      }
+
+      const pollHandle = setInterval(tick, 5000);
+      tick(); // check immediately instead of waiting 5s, useful right after a reload
+    }
+
+    // On load, reconnect to anything we previously submitted that hadn't
+    // finished yet.
+    for (const { taskId, label } of loadStoredTasks()) {
+      addTaskCard(taskId, label);
     }
 
     submitBtn.addEventListener("click", submitTask);
